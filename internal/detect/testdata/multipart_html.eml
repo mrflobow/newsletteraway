@@ -1,0 +1,20 @@
+From: Shop <deals@shop.example>
+To: me@example.com
+Subject: Weekly deals
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="b1"
+
+--b1
+Content-Type: text/plain; charset=utf-8
+
+Great deals this week! Visit https://shop.example/deals
+
+--b1
+Content-Type: text/html; charset=utf-8
+
+<html><body>
+<p>Great deals! <a href="https://shop.example/deals">Shop now</a></p>
+<p><a href="https://shop.example/privacy">Privacy</a> |
+<a href="https://shop.example/unsubscribe?u=42">Unsubscribe</a></p>
+</body></html>
+--b1--

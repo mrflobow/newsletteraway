@@ -1,0 +1,7 @@
+From: List <list@list.example>
+Subject: Update
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<p>Read <a href="https://list.example/post/1">the post</a>.</p>
+<p>To unsubscribe from this list, <a href="https://list.example/x/9f8e">click here</a>.</p>

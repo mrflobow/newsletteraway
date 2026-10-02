@@ -1,0 +1,10 @@
+From: Nachrichten <info@news.example.de>
+Subject: Ihr Newsletter
+MIME-Version: 1.0
+Content-Type: text/html; charset=iso-8859-1
+Content-Transfer-Encoding: quoted-printable
+
+<html><body><p>Gr=FC=DFe aus M=FCnchen!</p>
+<p>Wenn Sie keine E-Mails mehr erhalten m=F6chten, k=F6nnen Sie den <a href=
+=3D"https://news.example.de/abmelden?id=3D7">Newsletter abbestellen</a>.</p=
+></body></html>
