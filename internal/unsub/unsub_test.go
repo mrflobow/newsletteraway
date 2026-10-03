@@ -7,18 +7,32 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPost(t *testing.T) {
-	var method, ctype, body string
+	var method, ctype, body, agent string
 	status := http.StatusOK
+	slow := 0 // number of requests to /slow that stall
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/redir" {
-			http.Redirect(w, r, "/ok", http.StatusFound)
+		switch r.URL.Path {
+		case "/redir":
+			http.Redirect(w, r, "/u", http.StatusFound)
 			return
+		case "/loop":
+			http.Redirect(w, r, "/loop", http.StatusFound)
+			return
+		case "/plain":
+			http.Redirect(w, r, "http://example.com/x", http.StatusFound)
+			return
+		case "/slow":
+			if slow > 0 {
+				slow--
+				time.Sleep(400 * time.Millisecond)
+			}
 		}
 		b, _ := io.ReadAll(r.Body)
-		method, ctype, body = r.Method, r.Header.Get("Content-Type"), string(b)
+		method, ctype, body, agent = r.Method, r.Header.Get("Content-Type"), string(b), r.Header.Get("User-Agent")
 		w.WriteHeader(status)
 	}))
 	defer srv.Close()
@@ -31,6 +45,7 @@ func TestPost(t *testing.T) {
 	old := Client
 	Client = srv.Client()
 	Client.CheckRedirect = old.CheckRedirect
+	Client.Timeout = 200 * time.Millisecond
 	defer func() { Client = old }()
 
 	if err := Post(context.Background(), srv.URL+"/u"); err != nil {
@@ -39,8 +54,25 @@ func TestPost(t *testing.T) {
 	if method != "POST" || ctype != "application/x-www-form-urlencoded" || body != "List-Unsubscribe=One-Click" {
 		t.Errorf("got %s %q %q", method, ctype, body)
 	}
-	if err := Post(context.Background(), srv.URL+"/redir"); err == nil {
-		t.Error("redirect was followed or accepted")
+	if agent != userAgent {
+		t.Errorf("user agent %q", agent)
+	}
+	if err := Post(context.Background(), srv.URL+"/redir"); err != nil {
+		t.Errorf("redirect to a 2xx page: %v", err)
+	}
+	if err := Post(context.Background(), srv.URL+"/loop"); err == nil || !strings.Contains(err.Error(), "redirects") {
+		t.Errorf("redirect loop: %v", err)
+	}
+	if err := Post(context.Background(), srv.URL+"/plain"); err == nil || !strings.Contains(err.Error(), "non-https") {
+		t.Errorf("redirect to http: %v", err)
+	}
+	slow = 1 // first attempt times out, the retry succeeds
+	if err := Post(context.Background(), srv.URL+"/slow"); err != nil {
+		t.Errorf("timeout was not retried: %v", err)
+	}
+	slow = 2
+	if err := Post(context.Background(), srv.URL+"/slow"); err == nil {
+		t.Error("two timeouts accepted")
 	}
 	status = http.StatusInternalServerError
 	if err := Post(context.Background(), srv.URL+"/u"); err == nil {

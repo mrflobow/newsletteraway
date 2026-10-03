@@ -101,7 +101,7 @@ func writeFitted(w io.Writer, groups []Group, st Style) {
 	for _, g := range groups {
 		src := strings.TrimRight(Fit(sourceLabel(g), srcW), " ")
 		switch {
-		case g.Resubscribed:
+		case g.Resubscribed || g.Manual:
 			src = st.Yellow(src)
 		case g.OneClick:
 			src = st.Green(src)
@@ -133,6 +133,9 @@ func sourceLabel(g Group) string {
 	}
 	if g.Resubscribed {
 		parts = append(parts, "again")
+	}
+	if g.Manual {
+		parts = append(parts, "manual")
 	}
 	if len(parts) == 0 {
 		return string(detect.SourceHeader)

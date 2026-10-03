@@ -35,6 +35,7 @@ type Group struct {
 	Count        int                 `json:"count"`
 	LastDate     time.Time           `json:"last_date"`
 	Received     time.Time           `json:"last_received"`          // newest INTERNALDATE (falls back to the Date header)
+	Manual       bool                `json:"manual,omitempty"`       // one-click failed recently: unsubscribe by hand
 	Resubscribed bool                `json:"resubscribed,omitempty"` // mailed again after an earlier unsubscribe
 	LastSubject  string              `json:"last_subject"`
 	Links        []string            `json:"unsubscribe_links"`

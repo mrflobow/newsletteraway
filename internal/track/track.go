@@ -19,9 +19,14 @@ import (
 // days to process a request) before it counts as "mailing again".
 const Grace = 10 * 24 * time.Hour
 
-// Entry is one recorded unsubscribe.
+// RetryAfter is how long a failed one-click request is not retried
+// automatically; the sender is shown for manual unsubscribing instead.
+const RetryAfter = 7 * 24 * time.Hour
+
+// Entry is one recorded unsubscribe attempt. An empty Failure means success.
 type Entry struct {
-	At time.Time `json:"at"`
+	At      time.Time `json:"at"`
+	Failure string    `json:"failure,omitempty"`
 }
 
 // Store maps account + group key to the unsubscribe record.
@@ -61,6 +66,11 @@ func (s *Store) Add(account, group string, at time.Time) {
 	s.Entries[key(account, group)] = Entry{At: at.UTC()}
 }
 
+// AddFailure records a failed attempt with a short reason.
+func (s *Store) AddFailure(account, group string, at time.Time, reason string) {
+	s.Entries[key(account, group)] = Entry{At: at.UTC(), Failure: reason}
+}
+
 // Save writes the store atomically with mode 0600.
 func (s *Store) Save() error {
 	b, err := json.MarshalIndent(s, "", "  ")
@@ -79,11 +89,17 @@ func (s *Store) Save() error {
 
 // Apply drops groups that were unsubscribed and have not mailed since, and
 // marks groups that have (newest INTERNALDATE after the unsubscribe + Grace)
-// as Resubscribed.
-func (s *Store) Apply(account string, groups []report.Group) []report.Group {
+// as Resubscribed. Groups whose last attempt failed stay listed; within
+// RetryAfter they are marked Manual so they are not tried automatically.
+func (s *Store) Apply(account string, groups []report.Group, now time.Time) []report.Group {
 	out := groups[:0:0]
 	for _, g := range groups {
 		if e, ok := s.Entries[key(account, g.Key)]; ok {
+			if e.Failure != "" {
+				g.Manual = now.Before(e.At.Add(RetryAfter))
+				out = append(out, g)
+				continue
+			}
 			if !g.Received.After(e.At.Add(Grace)) {
 				continue
 			}

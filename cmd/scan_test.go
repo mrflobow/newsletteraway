@@ -213,3 +213,50 @@ func TestUnsubscribe(t *testing.T) {
 		t.Fatalf("err=%v posts=%d", err, posts)
 	}
 }
+
+func TestUnsubscribeFailureIsRemembered(t *testing.T) {
+	posts := 0
+	hook := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts++
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer hook.Close()
+	oldClient, oldTTY := unsub.Client, isTTY
+	unsub.Client = hook.Client()
+	defer func() { unsub.Client, isTTY = oldClient, oldTTY }()
+	isTTY = func() bool { return false }
+
+	host, port, _ := net.SplitHostPort(startServerMsg(t,
+		"From: Acme <news@acme.example>\r\nSubject: Weekly\r\nDate: Mon, 28 Sep 2026 10:00:00 +0000\r\n"+
+			"List-Unsubscribe: <"+hook.URL+"/u?token=secret>\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n\r\nhi\r\n"))
+	t.Setenv("NA_TEST_PW", "p")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	common := []string{"scan", "-q", "--host", host, "--port", port, "--security", "none", "--user", "u", "--password-env", "NA_TEST_PW"}
+
+	if _, err := run(t, append(common, "--unsubscribe", "-y")...); err == nil || posts != 1 {
+		t.Fatalf("expected failure after one POST, err=%v posts=%d", err, posts)
+	}
+	b, _ := os.ReadFile(track.DefaultPath())
+	if !strings.Contains(string(b), "403 Forbidden") || strings.Contains(string(b), "secret") {
+		t.Errorf("store should hold the reason but not the URL token:\n%s", b)
+	}
+
+	// Still listed, marked manual, and not POSTed again.
+	out, err := run(t, common...)
+	if err != nil || !strings.Contains(out, "news@acme.example") || !strings.Contains(out, "manual") {
+		t.Fatalf("manual sender missing: %v\n%s", err, out)
+	}
+	if _, err := run(t, append(common, "--unsubscribe", "-y")...); err != nil || posts != 1 {
+		t.Fatalf("retried inside the window: err=%v posts=%d", err, posts)
+	}
+
+	// After the retry window it is tried again.
+	store, _ := track.Load(track.DefaultPath())
+	store.AddFailure("u", "news@acme.example", time.Now().Add(-track.RetryAfter-time.Hour), "old")
+	store.Save()
+	if _, err := run(t, append(common, "--unsubscribe", "-y")...); err == nil || posts != 2 {
+		t.Fatalf("expected a retry after the window: err=%v posts=%d", err, posts)
+	}
+}

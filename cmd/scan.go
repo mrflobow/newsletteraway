@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -186,7 +187,7 @@ func runScan(cmd *cobra.Command, _ []string) error {
 		} else if j.report.Error != "" {
 			failed++
 		}
-		j.report.Groups = store.Apply(a.Name, j.report.Groups)
+		j.report.Groups = store.Apply(a.Name, j.report.Groups, time.Now())
 		j.report.Detected = 0
 		for _, g := range j.report.Groups {
 			j.report.Detected += g.Count
@@ -335,10 +336,20 @@ func unsubStep(jobs []*job, store *track.Store) error {
 	es := report.StyleFor(os.Stderr)
 	failures := 0
 	for _, j := range jobs {
-		var cands []report.Group
+		var cands, manual []report.Group
 		for _, g := range j.report.Groups {
-			if g.OneClick && oneClickURL(g) != "" {
+			switch {
+			case g.Manual:
+				manual = append(manual, g)
+			case g.OneClick && oneClickURL(g) != "":
 				cands = append(cands, g)
+			}
+		}
+		if len(manual) > 0 {
+			fmt.Fprintf(os.Stderr, "\n%s: one-click failed recently for %s sender(s), unsubscribe by hand (automatic retry after %d days):\n",
+				es.Cyan(j.account.Name), es.Bold(strconv.Itoa(len(manual))), int(track.RetryAfter.Hours()/24))
+			for _, g := range manual {
+				printManual(es, g)
 			}
 		}
 		if len(cands) == 0 {
@@ -380,12 +391,14 @@ func unsubStep(jobs []*job, store *track.Store) error {
 		for n, g := range chosen {
 			tag := fmt.Sprintf("[%d/%d]", n+1, len(chosen))
 			transient(es, tag+" requesting "+g.Key+" ...")
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 70*time.Second) // two attempts
 			err := unsub.Post(ctx, oneClickURL(g))
 			cancel()
 			if err != nil {
 				failures++
 				fmt.Fprintf(os.Stderr, "%s  %s %s: %s\n", clearPrefix(es), tag, es.Red("FAILED"), report.Clean(g.Key)+" - "+report.Clean(err.Error()))
+				printManual(es, g)
+				store.AddFailure(j.account.Name, g.Key, time.Now(), failureReason(err))
 				continue
 			}
 			store.Add(j.account.Name, g.Key, time.Now())
@@ -399,6 +412,20 @@ func unsubStep(jobs []*job, store *track.Store) error {
 		return fmt.Errorf("%d unsubscribe request(s) failed", failures)
 	}
 	return nil
+}
+
+// printManual shows the link to open in a browser; never cut, so it stays copyable.
+func printManual(es report.Style, g report.Group) {
+	fmt.Fprintf(os.Stderr, "      %s  %s\n", report.Clean(g.Key), es.Dim(report.Clean(oneClickURL(g))))
+}
+
+// failureReason is the error without the request URL (which carries a token),
+// so the tracking file does not keep it.
+func failureReason(err error) string {
+	if ue, ok := errors.AsType[*url.Error](err); ok {
+		err = ue.Err
+	}
+	return err.Error()
 }
 
 // oneClickURL is the https link of the group (SortLinks puts https first).
