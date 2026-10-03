@@ -84,7 +84,7 @@ func scanMailbox(c *imapconn.Conn, mb string, opts Options, logf func(string, ..
 		found     []report.Message
 		bodyQueue []report.Message // messages without header links
 	)
-	err = c.FetchHeaders(uids, detect.HeaderFields, 200, MaxHeaderBytes, func(uid imap.UID, raw []byte) error {
+	err = c.FetchHeaders(uids, detect.HeaderFields, 200, MaxHeaderBytes, func(uid imap.UID, received time.Time, raw []byte) error {
 		if len(raw) >= MaxHeaderBytes {
 			logf("%s: uid %d: headers larger than %d KB, skipped", mb, uid, MaxHeaderBytes>>10)
 			return nil
@@ -94,7 +94,7 @@ func scanMailbox(c *imapconn.Conn, mb string, opts Options, logf func(string, ..
 			logf("%s: uid %d: unparsable header: %v\n", mb, uid, err)
 			return nil
 		}
-		m := report.Message{Mailbox: mb, UID: uint32(uid), Result: detect.Classify(h)}
+		m := report.Message{Mailbox: mb, UID: uint32(uid), Received: received, Result: detect.Classify(h)}
 		switch {
 		case len(m.Links) > 0:
 			found = append(found, m)

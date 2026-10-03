@@ -7,7 +7,8 @@ A CLI that scans IMAP mailboxes for newsletters and lists their unsubscribe link
   - the `List-Unsubscribe` header (RFC 2369), with RFC 8058 one-click detection
   - the `List-Id` and `Precedence: bulk|list` headers
   - with `--body-scan`, unsubscribe links in the HTML or plain-text body (English, German, French, Spanish, Italian, Dutch wording)
-- **No automatic unsubscribing:** the tool only lists the links. You click them.
+- **Unsubscribing is opt-in:** a plain `scan` only lists the links. `scan --unsubscribe` sends RFC 8058 one-click requests (HTTPS POST) for senders that support it, after you pick them. Other senders (mailto, plain links) are never contacted; you click those yourself.
+- **Unsubscribe tracking:** every successful unsubscribe is recorded in `~/.config/newsletteraway/unsubscribed.json` (account, sender, time). Later scans hide that sender. If mail from it arrives more than 10 days after the unsubscribe (by the server's receive time), it shows up again marked `again`, e.g. after you signed up for a discount.
 - **Optional move:** `--move-to <folder>` moves the detected newsletters (in Gmail this applies a label).
 
 ## Install
@@ -32,6 +33,10 @@ newsletteraway scan                      # all accounts
 newsletteraway scan -a gmail --days 30 -o json | jq .
 newsletteraway scan -a gmail --group-by domain --body-scan
 newsletteraway scan -a gmail --move-to Newsletters --create-folder --dry-run
+
+# one-click unsubscribe: pick senders by number, or -y for all of them
+newsletteraway scan -a gmail --unsubscribe
+newsletteraway scan -a gmail --unsubscribe -y
 ```
 
 Example output:
@@ -160,6 +165,7 @@ Default path: `~/.config/newsletteraway/config.json`. Override it with `--config
 | `--group-by sender\|domain` | how results are grouped |
 | `-o, --output table\|json` | output format; progress messages go to stderr (`-q` silences them) |
 | `--move-to`, `--create-folder`, `--dry-run`, `-y, --yes` | move the detected newsletters; asks for confirmation unless `--yes` is passed |
+| `--unsubscribe` | list the one-click senders and ask which to unsubscribe from (`1,3`, `1-3`, `all`); with `-y` it unsubscribes from all of them without asking, so wanted senders and receipts go too; `--dry-run` only lists |
 
 The exit code is non-zero if any account failed. The other accounts are still scanned and reported.
 

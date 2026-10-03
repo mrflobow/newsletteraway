@@ -20,24 +20,27 @@ const (
 
 // Message is a detected newsletter message.
 type Message struct {
-	Mailbox string
-	UID     uint32
+	Mailbox  string
+	UID      uint32
+	Received time.Time // IMAP INTERNALDATE; zero if unknown
 	*detect.Result
 }
 
 // Group aggregates the newsletters of one sender (or domain).
 type Group struct {
-	Key         string              `json:"key"`
-	Name        string              `json:"name,omitempty"`
-	Senders     []string            `json:"senders,omitempty"` // only when grouped by domain
-	ListID      string              `json:"list_id,omitempty"`
-	Count       int                 `json:"count"`
-	LastDate    time.Time           `json:"last_date"`
-	LastSubject string              `json:"last_subject"`
-	Links       []string            `json:"unsubscribe_links"`
-	OneClick    bool                `json:"one_click"`
-	Sources     []detect.Source     `json:"sources"`
-	UIDs        map[string][]uint32 `json:"uids"` // mailbox -> UIDs
+	Key          string              `json:"key"`
+	Name         string              `json:"name,omitempty"`
+	Senders      []string            `json:"senders,omitempty"` // only when grouped by domain
+	ListID       string              `json:"list_id,omitempty"`
+	Count        int                 `json:"count"`
+	LastDate     time.Time           `json:"last_date"`
+	Received     time.Time           `json:"last_received"`          // newest INTERNALDATE (falls back to the Date header)
+	Resubscribed bool                `json:"resubscribed,omitempty"` // mailed again after an earlier unsubscribe
+	LastSubject  string              `json:"last_subject"`
+	Links        []string            `json:"unsubscribe_links"`
+	OneClick     bool                `json:"one_click"`
+	Sources      []detect.Source     `json:"sources"`
+	UIDs         map[string][]uint32 `json:"uids"` // mailbox -> UIDs
 }
 
 // AccountReport is the result for one account.
@@ -79,6 +82,13 @@ func Build(msgs []Message, by GroupBy) []Group {
 			order = append(order, key)
 		}
 		g.Count++
+		recv := m.Received
+		if recv.IsZero() {
+			recv = m.Date
+		}
+		if recv.After(g.Received) {
+			g.Received = recv
+		}
 		g.UIDs[m.Mailbox] = append(g.UIDs[m.Mailbox], m.UID)
 		senders[key][m.FromAddress] = true
 		for _, s := range m.Sources {

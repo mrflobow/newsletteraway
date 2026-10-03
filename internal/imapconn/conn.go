@@ -101,8 +101,9 @@ func (c *Conn) SearchSince(since time.Time, limit int) ([]imap.UID, error) {
 
 // FetchHeaders fetches the given header fields for uids in batches and calls
 // fn for every message. At most maxBytes of each header are transferred
-// (0 = unlimited), so a header of exactly maxBytes may be truncated.
-func (c *Conn) FetchHeaders(uids []imap.UID, fields []string, batch int, maxBytes int64, fn func(uid imap.UID, header []byte) error) error {
+// (0 = unlimited), so a header of exactly maxBytes may be truncated. received
+// is the server's INTERNALDATE, which the sender cannot forge.
+func (c *Conn) FetchHeaders(uids []imap.UID, fields []string, batch int, maxBytes int64, fn func(uid imap.UID, received time.Time, header []byte) error) error {
 	if batch <= 0 {
 		batch = 200
 	}
@@ -114,7 +115,7 @@ func (c *Conn) FetchHeaders(uids []imap.UID, fields []string, batch int, maxByte
 	if maxBytes > 0 {
 		section.Partial = &imap.SectionPartial{Offset: 0, Size: maxBytes}
 	}
-	opts := &imap.FetchOptions{UID: true, BodySection: []*imap.FetchItemBodySection{section}}
+	opts := &imap.FetchOptions{UID: true, InternalDate: true, BodySection: []*imap.FetchItemBodySection{section}}
 	for start := 0; start < len(uids); start += batch {
 		end := min(start+batch, len(uids))
 		msgs, err := c.c.Fetch(imap.UIDSetNum(uids[start:end]...), opts).Collect()
@@ -126,7 +127,7 @@ func (c *Conn) FetchHeaders(uids []imap.UID, fields []string, batch int, maxByte
 			if len(m.BodySection) > 0 {
 				raw = m.BodySection[0].Bytes
 			}
-			if err := fn(m.UID, raw); err != nil {
+			if err := fn(m.UID, m.InternalDate, raw); err != nil {
 				return err
 			}
 		}

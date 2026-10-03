@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +20,8 @@ import (
 	"github.com/mrflobow/newsletteraway/internal/oauth"
 	"github.com/mrflobow/newsletteraway/internal/report"
 	"github.com/mrflobow/newsletteraway/internal/scanner"
+	"github.com/mrflobow/newsletteraway/internal/track"
+	"github.com/mrflobow/newsletteraway/internal/unsub"
 )
 
 type scanFlags struct {
@@ -44,6 +48,7 @@ type scanFlags struct {
 	createFolder bool
 	yes          bool
 	dryRun       bool
+	unsubscribe  bool
 }
 
 var sf scanFlags
@@ -56,7 +61,9 @@ var scanCmd = &cobra.Command{
   newsletteraway scan --provider gmail --user me@gmail.com --password-env GMAIL_APP_PW
   newsletteraway scan --provider icloud --user me@icloud.com --output json
   newsletteraway scan --provider outlook --user me@outlook.com --auth oauth2 --oauth2-client-id <app-id>
-  newsletteraway scan --account gmail --move-to Newsletters --create-folder --dry-run`,
+  newsletteraway scan --account gmail --move-to Newsletters --create-folder --dry-run
+  newsletteraway scan --account gmail --unsubscribe       # pick senders for 1-click unsubscribe
+  newsletteraway scan --account gmail --unsubscribe -y    # unsubscribe from all 1-click senders`,
 	Args: cobra.NoArgs,
 	RunE: runScan,
 }
@@ -84,8 +91,9 @@ func init() {
 	f.BoolVarP(&sf.quiet, "quiet", "q", false, "suppress progress messages on stderr")
 	f.StringVar(&sf.moveTo, "move-to", "", "move detected newsletters to this folder (Gmail: label)")
 	f.BoolVar(&sf.createFolder, "create-folder", false, "create the --move-to folder if missing")
-	f.BoolVarP(&sf.yes, "yes", "y", false, "do not ask for confirmation before moving")
-	f.BoolVar(&sf.dryRun, "dry-run", false, "with --move-to: only show what would be moved")
+	f.BoolVarP(&sf.yes, "yes", "y", false, "do not ask for confirmation before moving or unsubscribing")
+	f.BoolVar(&sf.dryRun, "dry-run", false, "with --move-to or --unsubscribe: only show what would happen")
+	f.BoolVar(&sf.unsubscribe, "unsubscribe", false, "send RFC 8058 one-click unsubscribe requests (asks which senders)")
 	rootCmd.AddCommand(scanCmd)
 }
 
@@ -103,8 +111,11 @@ func runScan(cmd *cobra.Command, _ []string) error {
 	if sf.groupBy != string(report.BySender) && sf.groupBy != string(report.ByDomain) {
 		return fmt.Errorf("invalid --group-by %q (sender, domain)", sf.groupBy)
 	}
-	if (sf.dryRun || sf.createFolder) && sf.moveTo == "" {
-		return errors.New("--dry-run and --create-folder require --move-to")
+	if sf.createFolder && sf.moveTo == "" {
+		return errors.New("--create-folder requires --move-to")
+	}
+	if sf.dryRun && sf.moveTo == "" && !sf.unsubscribe {
+		return errors.New("--dry-run requires --move-to or --unsubscribe")
 	}
 
 	overrides := config.Overrides{
@@ -155,6 +166,10 @@ func runScan(cmd *cobra.Command, _ []string) error {
 	}
 
 	secrets := config.DefaultSecretResolver()
+	store, err := track.Load(track.DefaultPath())
+	if err != nil {
+		return err
+	}
 	var (
 		jobs   []*job
 		failed int
@@ -170,6 +185,11 @@ func runScan(cmd *cobra.Command, _ []string) error {
 			}
 		} else if j.report.Error != "" {
 			failed++
+		}
+		j.report.Groups = store.Apply(a.Name, j.report.Groups)
+		j.report.Detected = 0
+		for _, g := range j.report.Groups {
+			j.report.Detected += g.Count
 		}
 	}
 
@@ -189,6 +209,11 @@ func runScan(cmd *cobra.Command, _ []string) error {
 
 	if sf.moveTo != "" {
 		if err := moveStep(jobs); err != nil {
+			return err
+		}
+	}
+	if sf.unsubscribe {
+		if err := unsubStep(jobs, store); err != nil {
 			return err
 		}
 	}
@@ -288,6 +313,137 @@ func moveStep(jobs []*job) error {
 		}
 	}
 	return nil
+}
+
+// stdin and isTTY are replaced by tests.
+var (
+	stdin io.Reader = os.Stdin
+	isTTY           = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
+)
+
+// unsubStep offers every one-click group for unsubscribing: the user picks
+// numbers (or -y takes all), then the POSTs are sent and recorded in store.
+func unsubStep(jobs []*job, store *track.Store) error {
+	in := bufio.NewReader(stdin)
+	failures := 0
+	for _, j := range jobs {
+		var cands []report.Group
+		for _, g := range j.report.Groups {
+			if g.OneClick && oneClickURL(g) != "" {
+				cands = append(cands, g)
+			}
+		}
+		if len(cands) == 0 {
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "\n%s: one-click unsubscribe available for %d sender(s):\n", j.account.Name, len(cands))
+		for i, g := range cands {
+			fmt.Fprintf(os.Stderr, "  %2d  %-40s %4d mails  last %s\n", i+1, truncateRunes(report.Clean(g.Key), 40), g.Count, g.Received.Format("2006-01-02"))
+		}
+		chosen := cands
+		if sf.dryRun {
+			continue
+		}
+		if !sf.yes {
+			if !isTTY() {
+				return errors.New("refusing to unsubscribe without confirmation on a non-interactive stdin; pass -y")
+			}
+			fmt.Fprint(os.Stderr, `Unsubscribe from (e.g. 1,3 or 1-3, "all", Enter = cancel): `)
+			ans, _ := in.ReadString('\n')
+			idx, err := parseSelection(ans, len(cands))
+			if err != nil {
+				return err
+			}
+			if len(idx) == 0 {
+				fmt.Fprintln(os.Stderr, "skipped")
+				continue
+			}
+			chosen = nil
+			for _, i := range idx {
+				chosen = append(chosen, cands[i])
+			}
+			fmt.Fprintf(os.Stderr, "About to unsubscribe from %d sender(s). Continue? [y/N] ", len(chosen))
+			ans, _ = in.ReadString('\n')
+			if a := strings.ToLower(strings.TrimSpace(ans)); a != "y" && a != "yes" {
+				fmt.Fprintln(os.Stderr, "skipped")
+				continue
+			}
+		}
+		for _, g := range chosen {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			err := unsub.Post(ctx, oneClickURL(g))
+			cancel()
+			if err != nil {
+				failures++
+				fmt.Fprintf(os.Stderr, "  FAILED  %s: %s\n", report.Clean(g.Key), report.Clean(err.Error()))
+				continue
+			}
+			store.Add(j.account.Name, g.Key, time.Now())
+			fmt.Fprintf(os.Stderr, "  OK      %s\n", report.Clean(g.Key))
+		}
+	}
+	if err := store.Save(); err != nil {
+		return err
+	}
+	if failures > 0 {
+		return fmt.Errorf("%d unsubscribe request(s) failed", failures)
+	}
+	return nil
+}
+
+// oneClickURL is the https link of the group (SortLinks puts https first).
+func oneClickURL(g report.Group) string {
+	for _, l := range g.Links {
+		if strings.HasPrefix(strings.ToLower(l), "https:") {
+			return l
+		}
+	}
+	return ""
+}
+
+// parseSelection turns "1,3", "2-4" or "all" into sorted 0-based indices
+// below n. An empty answer selects nothing.
+func parseSelection(s string, n int) ([]int, error) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return nil, nil
+	}
+	seen := map[int]bool{}
+	if s == "all" {
+		for i := 0; i < n; i++ {
+			seen[i] = true
+		}
+	}
+	for _, part := range strings.Split(s, ",") {
+		if s == "all" {
+			break
+		}
+		lo, hi, isRange := strings.Cut(strings.TrimSpace(part), "-")
+		a, err := strconv.Atoi(strings.TrimSpace(lo))
+		b := a
+		if err == nil && isRange {
+			b, err = strconv.Atoi(strings.TrimSpace(hi))
+		}
+		if err != nil || a < 1 || b < a || b > n {
+			return nil, fmt.Errorf("invalid selection %q (use numbers 1-%d, e.g. 1,3 or 2-4, or all)", part, n)
+		}
+		for i := a; i <= b; i++ {
+			seen[i-1] = true
+		}
+	}
+	idx := make([]int, 0, len(seen))
+	for i := range seen {
+		idx = append(idx, i)
+	}
+	sort.Ints(idx)
+	return idx, nil
+}
+
+func truncateRunes(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n-1]) + "…"
+	}
+	return s
 }
 
 // tokenStore holds OAuth2 tokens; tests replace it.

@@ -72,6 +72,9 @@ func sourceLabel(g Group) string {
 	if g.OneClick {
 		parts = append(parts, "1-click")
 	}
+	if g.Resubscribed {
+		parts = append(parts, "again")
+	}
 	if len(parts) == 0 {
 		return string(detect.SourceHeader)
 	}
