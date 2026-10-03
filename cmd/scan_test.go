@@ -186,7 +186,7 @@ func TestUnsubscribe(t *testing.T) {
 
 	// Interactive: pick sender 1, confirm.
 	isTTY = func() bool { return true }
-	stdin = strings.NewReader("1\ny\n")
+	stdin = strings.NewReader("1\n")
 	if _, err := run(t, append(common, "--unsubscribe")...); err != nil || posts != 1 {
 		t.Fatalf("err=%v posts=%d", err, posts)
 	}

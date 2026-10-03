@@ -201,7 +201,7 @@ func runScan(cmd *cobra.Command, _ []string) error {
 	if sf.output == "json" {
 		err = report.WriteJSON(out, reports)
 	} else {
-		err = report.WriteTable(out, reports)
+		err = report.WriteTableStyled(out, reports, outStyle(out))
 	}
 	if err != nil {
 		return err
@@ -241,17 +241,21 @@ func scanOptions(cmd *cobra.Command, d config.Defaults) (scanner.Options, error)
 	if !flags.Changed("body-scan") {
 		bodyScan = d.BodyScan
 	}
-	var log io.Writer = os.Stderr
-	if sf.quiet {
-		log = nil
-	}
-	return scanner.Options{
+	opts := scanner.Options{
 		Since:    since,
 		Limit:    limit,
 		BodyScan: bodyScan,
 		GroupBy:  report.GroupBy(sf.groupBy),
-		Log:      log,
-	}, nil
+	}
+	if !sf.quiet {
+		opts.Log = os.Stderr
+		if st := report.StyleFor(os.Stderr); st.Width > 0 {
+			p := &progress{w: os.Stderr, st: st}
+			opts.Log = clearingWriter{p: p, w: os.Stderr}
+			opts.Progress = p.update
+		}
+	}
+	return opts, nil
 }
 
 func scanAccount(j *job, secrets *config.SecretResolver, opts scanner.Options) error {
@@ -271,6 +275,9 @@ func scanAccount(j *job, secrets *config.SecretResolver, opts scanner.Options) e
 
 	if opts.Log != nil {
 		opts.Log = prefixWriter{prefix: j.account.Name + "/", w: opts.Log}
+	}
+	if inner := opts.Progress; inner != nil {
+		opts.Progress = func(label string, done, total int) { inner(j.account.Name+"/"+label, done, total) }
 	}
 	j.report = scanner.Scan(conn, j.account.Name, j.account.Mailboxes, opts)
 	return nil
@@ -325,6 +332,7 @@ var (
 // numbers (or -y takes all), then the POSTs are sent and recorded in store.
 func unsubStep(jobs []*job, store *track.Store) error {
 	in := bufio.NewReader(stdin)
+	es := report.StyleFor(os.Stderr)
 	failures := 0
 	for _, j := range jobs {
 		var cands []report.Group
@@ -336,9 +344,15 @@ func unsubStep(jobs []*job, store *track.Store) error {
 		if len(cands) == 0 {
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "\n%s: one-click unsubscribe available for %d sender(s):\n", j.account.Name, len(cands))
+		fmt.Fprintf(os.Stderr, "\n%s: one-click unsubscribe available for %s sender(s):\n", es.Cyan(j.account.Name), es.Bold(strconv.Itoa(len(cands))))
+		// fixed part of a row: "  NN  " + " NNNN mails  last YYYY-MM-DD"
+		keyW := 40
+		if es.Width > 0 {
+			keyW = max(es.Width-37, 16)
+		}
 		for i, g := range cands {
-			fmt.Fprintf(os.Stderr, "  %2d  %-40s %4d mails  last %s\n", i+1, truncateRunes(report.Clean(g.Key), 40), g.Count, g.Received.Format("2006-01-02"))
+			fmt.Fprintf(os.Stderr, "  %s  %s %4d mails  last %s\n", es.Bold(fmt.Sprintf("%2d", i+1)),
+				report.Fit(report.Clean(g.Key), keyW), g.Count, g.Received.Format("2006-01-02"))
 		}
 		chosen := cands
 		if sf.dryRun {
@@ -348,7 +362,7 @@ func unsubStep(jobs []*job, store *track.Store) error {
 			if !isTTY() {
 				return errors.New("refusing to unsubscribe without confirmation on a non-interactive stdin; pass -y")
 			}
-			fmt.Fprint(os.Stderr, `Unsubscribe from (e.g. 1,3 or 1-3, "all", Enter = cancel): `)
+			fmt.Fprint(os.Stderr, es.Bold(`Unsubscribe from which? (e.g. 1,3 or 1-3, "all", Enter = cancel): `))
 			ans, _ := in.ReadString('\n')
 			idx, err := parseSelection(ans, len(cands))
 			if err != nil {
@@ -362,24 +376,20 @@ func unsubStep(jobs []*job, store *track.Store) error {
 			for _, i := range idx {
 				chosen = append(chosen, cands[i])
 			}
-			fmt.Fprintf(os.Stderr, "About to unsubscribe from %d sender(s). Continue? [y/N] ", len(chosen))
-			ans, _ = in.ReadString('\n')
-			if a := strings.ToLower(strings.TrimSpace(ans)); a != "y" && a != "yes" {
-				fmt.Fprintln(os.Stderr, "skipped")
-				continue
-			}
 		}
-		for _, g := range chosen {
+		for n, g := range chosen {
+			tag := fmt.Sprintf("[%d/%d]", n+1, len(chosen))
+			transient(es, tag+" requesting "+g.Key+" ...")
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			err := unsub.Post(ctx, oneClickURL(g))
 			cancel()
 			if err != nil {
 				failures++
-				fmt.Fprintf(os.Stderr, "  FAILED  %s: %s\n", report.Clean(g.Key), report.Clean(err.Error()))
+				fmt.Fprintf(os.Stderr, "%s  %s %s: %s\n", clearPrefix(es), tag, es.Red("FAILED"), report.Clean(g.Key)+" - "+report.Clean(err.Error()))
 				continue
 			}
 			store.Add(j.account.Name, g.Key, time.Now())
-			fmt.Fprintf(os.Stderr, "  OK      %s\n", report.Clean(g.Key))
+			fmt.Fprintf(os.Stderr, "%s  %s %s     %s\n", clearPrefix(es), tag, es.Green("OK"), report.Clean(g.Key))
 		}
 	}
 	if err := store.Save(); err != nil {
@@ -439,11 +449,12 @@ func parseSelection(s string, n int) ([]int, error) {
 	return idx, nil
 }
 
-func truncateRunes(s string, n int) string {
-	if r := []rune(s); len(r) > n {
-		return string(r[:n-1]) + "…"
+// clearPrefix wipes a pending transient line (terminal only).
+func clearPrefix(st report.Style) string {
+	if st.Width > 0 {
+		return clearLine
 	}
-	return s
+	return ""
 }
 
 // tokenStore holds OAuth2 tokens; tests replace it.

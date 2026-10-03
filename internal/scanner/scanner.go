@@ -35,6 +35,9 @@ type Options struct {
 	BodyMaxBytes int64
 	GroupBy      report.GroupBy
 	Log          io.Writer // progress output; nil = silent
+	// Progress, if set, is called as messages are processed (label like
+	// "INBOX" or "INBOX body"); done == total == 0 means "finished, clear".
+	Progress func(label string, done, total int)
 }
 
 // Scan examines every mailbox read-only and returns the account report.
@@ -83,8 +86,17 @@ func scanMailbox(c *imapconn.Conn, mb string, opts Options, logf func(string, ..
 	var (
 		found     []report.Message
 		bodyQueue []report.Message // messages without header links
+		done      int
 	)
+	progress := func(label string, n, total int) {
+		if opts.Progress != nil {
+			opts.Progress(label, n, total)
+		}
+	}
+	defer progress(mb, 0, 0)
 	err = c.FetchHeaders(uids, detect.HeaderFields, 200, MaxHeaderBytes, func(uid imap.UID, received time.Time, raw []byte) error {
+		done++
+		progress(mb, done, len(uids))
 		if len(raw) >= MaxHeaderBytes {
 			logf("%s: uid %d: headers larger than %d KB, skipped", mb, uid, MaxHeaderBytes>>10)
 			return nil
@@ -112,7 +124,8 @@ func scanMailbox(c *imapconn.Conn, mb string, opts Options, logf func(string, ..
 	if len(bodyQueue) > 0 {
 		logf("%s: body scan of %d messages without List-Unsubscribe\n", mb, len(bodyQueue))
 	}
-	for _, m := range bodyQueue {
+	for i, m := range bodyQueue {
+		progress(mb+" body", i+1, len(bodyQueue))
 		raw, err := c.FetchBody(imap.UID(m.UID), opts.BodyMaxBytes)
 		if err != nil {
 			return found, len(uids), fmt.Errorf("%s: %w", mb, err)

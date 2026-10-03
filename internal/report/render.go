@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -18,22 +19,34 @@ func WriteJSON(w io.Writer, reports []AccountReport) error {
 	return enc.Encode(reports)
 }
 
-// WriteTable writes a human readable table per account. All text that can
-// come from emails or servers is passed through Clean.
+// WriteTable writes a human readable table per account in plain style.
 func WriteTable(w io.Writer, reports []AccountReport) error {
+	return WriteTableStyled(w, reports, Style{})
+}
+
+// WriteTableStyled writes a human readable table per account. All text that
+// can come from emails or servers is passed through Clean. With a terminal
+// Style the rows are fitted to the width, links go on their own lines (never
+// cut, so they stay copyable) and important things are colored.
+func WriteTableStyled(w io.Writer, reports []AccountReport, st Style) error {
 	for i, r := range reports {
 		if i > 0 {
 			fmt.Fprintln(w)
 		}
-		fmt.Fprintf(w, "== %s [%s]\n", Clean(r.Account), Clean(strings.Join(r.Mailboxes, ", ")))
+		fmt.Fprintf(w, "%s [%s]\n", st.Cyan("== "+Clean(r.Account)), Clean(strings.Join(r.Mailboxes, ", ")))
 		if r.Error != "" {
-			fmt.Fprintf(w, "   error: %s\n", Clean(r.Error))
+			fmt.Fprintf(w, "   %s %s\n", st.Red("error:"), Clean(r.Error))
 			if len(r.Groups) == 0 {
 				continue
 			}
 		}
-		fmt.Fprintf(w, "   %d newsletter messages from %d senders (%d messages scanned)\n\n", r.Detected, len(r.Groups), r.Scanned)
+		fmt.Fprintf(w, "   %s newsletter messages from %s senders (%d messages scanned)\n\n",
+			st.Bold(strconv.Itoa(r.Detected)), st.Bold(strconv.Itoa(len(r.Groups))), r.Scanned)
 		if len(r.Groups) == 0 {
+			continue
+		}
+		if st.Width > 0 {
+			writeFitted(w, r.Groups, st)
 			continue
 		}
 		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
@@ -55,6 +68,52 @@ func WriteTable(w io.Writer, reports []AccountReport) error {
 		}
 	}
 	return nil
+}
+
+// writeFitted renders one row per sender within st.Width columns, with the
+// links indented below it. The SOURCE column is dropped when it would leave
+// less than minSender columns for the sender.
+func writeFitted(w io.Writer, groups []Group, st Style) {
+	const (
+		minSender = 16
+		countW    = 5
+		dateW     = 10
+	)
+	srcW := 0
+	for _, g := range groups {
+		srcW = max(srcW, len([]rune(sourceLabel(g))))
+	}
+	srcW = min(srcW, 16)
+	fixed := 1 + 2 + countW + 2 + dateW // lead, gaps, count, date
+	senderW := st.Width - fixed - 2 - srcW
+	if senderW < minSender {
+		srcW = 0
+		senderW = max(st.Width-fixed, 8)
+	}
+	row := func(sender, count, date, src string) string {
+		line := " " + sender + "  " + count + "  " + date
+		if srcW > 0 {
+			line += "  " + src
+		}
+		return line
+	}
+	fmt.Fprintln(w, st.Bold(row(Fit("SENDER", senderW), fmt.Sprintf("%*s", countW, "COUNT"), Fit("LAST", dateW), "SOURCE")))
+	for _, g := range groups {
+		src := strings.TrimRight(Fit(sourceLabel(g), srcW), " ")
+		switch {
+		case g.Resubscribed:
+			src = st.Yellow(src)
+		case g.OneClick:
+			src = st.Green(src)
+		}
+		fmt.Fprintln(w, row(Fit(Clean(senderLabel(g)), senderW), st.Bold(fmt.Sprintf("%*d", countW, g.Count)), g.LastDate.Format("2006-01-02"), src))
+		if len(g.Links) == 0 {
+			fmt.Fprintf(w, "    %s\n", st.Dim("(no unsubscribe link)"))
+		}
+		for _, l := range g.Links {
+			fmt.Fprintf(w, "    %s\n", st.Dim(Clean(l)))
+		}
+	}
 }
 
 func senderLabel(g Group) string {

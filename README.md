@@ -8,6 +8,7 @@ A CLI that scans IMAP mailboxes for newsletters and lists their unsubscribe link
   - the `List-Id` and `Precedence: bulk|list` headers
   - with `--body-scan`, unsubscribe links in the HTML or plain-text body (English, German, French, Spanish, Italian, Dutch wording)
 - **Unsubscribing is opt-in:** a plain `scan` only lists the links. `scan --unsubscribe` sends RFC 8058 one-click requests (HTTPS POST) for senders that support it, after you pick them. Other senders (mailto, plain links) are never contacted; you click those yourself.
+- **Terminal output:** on a terminal the table is fitted to the window width (links go on their own lines, never cut), important things are colored (1-click green, `again` yellow, errors red) and a progress bar shows scan progress on stderr. Pipes and files get plain, uncolored output; `NO_COLOR=1` turns colors off.
 - **Unsubscribe tracking:** every successful unsubscribe is recorded in `~/.config/newsletteraway/unsubscribed.json` (account, sender, time). Later scans hide that sender. If mail from it arrives more than 10 days after the unsubscribe (by the server's receive time), it shows up again marked `again`, e.g. after you signed up for a discount.
 - **Optional move:** `--move-to <folder>` moves the detected newsletters (in Gmail this applies a label).
 
