@@ -71,3 +71,31 @@ func transient(st report.Style, text string) {
 		fmt.Fprint(os.Stderr, clearLine, st.Dim(report.Fit(report.Clean(text), min(len([]rune(text)), st.Width-1))))
 	}
 }
+
+// withElapsed runs fn while a terminal shows "text ... 12s", updated every
+// second, so a slow server does not look like a hang.
+func withElapsed(st report.Style, text string, fn func() error) error {
+	if st.Width == 0 {
+		return fn()
+	}
+	start := time.Now()
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		transient(st, text+" ...")
+		for {
+			select {
+			case <-t.C:
+				transient(st, fmt.Sprintf("%s ... %ds", text, int(time.Since(start).Seconds())))
+			case <-stop:
+				return
+			}
+		}
+	}()
+	err := fn()
+	close(stop)
+	<-done
+	return err
+}

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/signal"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,6 +51,7 @@ type scanFlags struct {
 	yes          bool
 	dryRun       bool
 	unsubscribe  bool
+	retryFailed  bool
 }
 
 var sf scanFlags
@@ -94,6 +96,7 @@ func init() {
 	f.BoolVar(&sf.createFolder, "create-folder", false, "create the --move-to folder if missing")
 	f.BoolVarP(&sf.yes, "yes", "y", false, "do not ask for confirmation before moving or unsubscribing")
 	f.BoolVar(&sf.dryRun, "dry-run", false, "with --move-to or --unsubscribe: only show what would happen")
+	f.BoolVar(&sf.retryFailed, "retry-failed", false, "with --unsubscribe: also retry senders whose earlier one-click request failed")
 	f.BoolVar(&sf.unsubscribe, "unsubscribe", false, "send RFC 8058 one-click unsubscribe requests (asks which senders)")
 	rootCmd.AddCommand(scanCmd)
 }
@@ -114,6 +117,9 @@ func runScan(cmd *cobra.Command, _ []string) error {
 	}
 	if sf.createFolder && sf.moveTo == "" {
 		return errors.New("--create-folder requires --move-to")
+	}
+	if sf.retryFailed && !sf.unsubscribe {
+		return errors.New("--retry-failed requires --unsubscribe")
 	}
 	if sf.dryRun && sf.moveTo == "" && !sf.unsubscribe {
 		return errors.New("--dry-run requires --move-to or --unsubscribe")
@@ -187,7 +193,7 @@ func runScan(cmd *cobra.Command, _ []string) error {
 		} else if j.report.Error != "" {
 			failed++
 		}
-		j.report.Groups = store.Apply(a.Name, j.report.Groups, time.Now())
+		j.report.Groups = store.Apply(a.Name, j.report.Groups, time.Now(), sf.retryFailed)
 		j.report.Detected = 0
 		for _, g := range j.report.Groups {
 			j.report.Detected += g.Count
@@ -335,21 +341,14 @@ func unsubStep(jobs []*job, store *track.Store) error {
 	in := bufio.NewReader(stdin)
 	es := report.StyleFor(os.Stderr)
 	failures := 0
+	// Ctrl-C stops after the current request; what was done is still saved.
+	sigCtx, stopSig := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stopSig()
 	for _, j := range jobs {
-		var cands, manual []report.Group
+		var cands []report.Group
 		for _, g := range j.report.Groups {
-			switch {
-			case g.Manual:
-				manual = append(manual, g)
-			case g.OneClick && oneClickURL(g) != "":
+			if !g.Manual && g.OneClick && oneClickURL(g) != "" { // manual ones are marked in the report
 				cands = append(cands, g)
-			}
-		}
-		if len(manual) > 0 {
-			fmt.Fprintf(os.Stderr, "\n%s: one-click failed recently for %s sender(s), unsubscribe by hand (automatic retry after %d days):\n",
-				es.Cyan(j.account.Name), es.Bold(strconv.Itoa(len(manual))), int(track.RetryAfter.Hours()/24))
-			for _, g := range manual {
-				printManual(es, g)
 			}
 		}
 		if len(cands) == 0 {
@@ -389,19 +388,38 @@ func unsubStep(jobs []*job, store *track.Store) error {
 			}
 		}
 		for n, g := range chosen {
+			if sigCtx.Err() != nil {
+				fmt.Fprintln(os.Stderr, "interrupted")
+				break
+			}
 			tag := fmt.Sprintf("[%d/%d]", n+1, len(chosen))
-			transient(es, tag+" requesting "+g.Key+" ...")
-			ctx, cancel := context.WithTimeout(context.Background(), 70*time.Second) // two attempts
-			err := unsub.Post(ctx, oneClickURL(g))
+			ctx, cancel := context.WithTimeout(sigCtx, 2*unsub.AttemptTimeout+5*time.Second) // two attempts
+			err := withElapsed(es, tag+" requesting "+g.Key, func() error { return unsub.Post(ctx, oneClickURL(g)) })
 			cancel()
+			if sigCtx.Err() != nil && err != nil {
+				fmt.Fprintf(os.Stderr, "%s  %s interrupted: %s\n", clearPrefix(es), tag, report.Clean(g.Key))
+				break // not a sender failure: do not record it
+			}
 			if err != nil {
 				failures++
 				fmt.Fprintf(os.Stderr, "%s  %s %s: %s\n", clearPrefix(es), tag, es.Red("FAILED"), report.Clean(g.Key)+" - "+report.Clean(err.Error()))
+				temp := unsub.Temporary(err)
+				if temp {
+					fmt.Fprintf(os.Stderr, "      %s\n", es.Dim("temporary: tried again automatically after 1 day, or now with --retry-failed"))
+				} else {
+					fmt.Fprintf(os.Stderr, "      %s\n", es.Dim("the sender refused: unsubscribe in your browser; --retry-failed tries again"))
+				}
 				printManual(es, g)
-				store.AddFailure(j.account.Name, g.Key, time.Now(), failureReason(err))
+				store.AddFailure(j.account.Name, g.Key, time.Now(), failureReason(err), temp)
+				if err := store.Save(); err != nil {
+					return err
+				}
 				continue
 			}
 			store.Add(j.account.Name, g.Key, time.Now())
+			if err := store.Save(); err != nil { // after every request, so Ctrl-C loses nothing
+				return err
+			}
 			fmt.Fprintf(os.Stderr, "%s  %s %s     %s\n", clearPrefix(es), tag, es.Green("OK"), report.Clean(g.Key))
 		}
 	}

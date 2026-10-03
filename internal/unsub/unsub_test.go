@@ -2,10 +2,15 @@ package unsub
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -84,3 +89,32 @@ func TestPost(t *testing.T) {
 		}
 	}
 }
+
+func TestTemporary(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"503", &StatusError{503, "503 Service Unavailable"}, true},
+		{"429", &StatusError{429, "429 Too Many Requests"}, true},
+		{"403", &StatusError{403, "403 Forbidden"}, false},
+		{"404", &StatusError{404, "404 Not Found"}, false},
+		{"deadline", context.DeadlineExceeded, true},
+		{"timeout", &url.Error{Op: "Post", URL: "https://x.example", Err: &net.OpError{Op: "dial", Err: timeoutErr{}}}, true},
+		{"refused", &url.Error{Op: "Post", URL: "https://x.example", Err: &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}}, true},
+		{"dns not found", &url.Error{Err: &net.DNSError{IsNotFound: true}}, false},
+		{"redirect policy", &url.Error{Op: "Post", URL: "https://x.example", Err: errors.New("redirected to a non-https URL")}, false},
+		{"non-public", &url.Error{Err: &net.OpError{Op: "dial", Err: fmt.Errorf("%w 10.0.0.1", ErrNonPublic)}}, false},
+	} {
+		if got := Temporary(tc.err); got != tc.want {
+			t.Errorf("%s: got %v want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "i/o timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }

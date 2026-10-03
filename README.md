@@ -9,7 +9,7 @@ A CLI that scans IMAP mailboxes for newsletters and lists their unsubscribe link
   - with `--body-scan`, unsubscribe links in the HTML or plain-text body (English, German, French, Spanish, Italian, Dutch wording)
 - **Unsubscribing is opt-in:** a plain `scan` only lists the links. `scan --unsubscribe` sends RFC 8058 one-click requests (HTTPS POST) for senders that support it, after you pick them. Other senders (mailto, plain links) are never contacted; you click those yourself.
 - **Terminal output:** on a terminal the table is fitted to the window width (links go on their own lines, never cut), important things are colored (1-click green, `again` yellow, errors red) and a progress bar shows scan progress on stderr. Pipes and files get plain, uncolored output; `NO_COLOR=1` turns colors off.
-- **Failures:** if a sender refuses or times out, the link is printed so you can unsubscribe in the browser. That sender is marked `manual` and is not retried automatically for 7 days.
+- **Failures:** the link is printed so you can unsubscribe in the browser, and the sender is marked `manual`. Temporary failures (timeout, network error, 5xx, 429) are tried again automatically after 1 day. Permanent ones (403, 404, bad redirect) are not retried; `scan --unsubscribe --retry-failed` forces another try for all of them.
 - **Unsubscribe tracking:** every successful unsubscribe is recorded in `~/.config/newsletteraway/unsubscribed.json` (account, sender, time). Later scans hide that sender. If mail from it arrives more than 10 days after the unsubscribe (by the server's receive time), it shows up again marked `again`, e.g. after you signed up for a discount.
 - **Optional move:** `--move-to <folder>` moves the detected newsletters (in Gmail this applies a label).
 
@@ -167,6 +167,7 @@ Default path: `~/.config/newsletteraway/config.json`. Override it with `--config
 | `--group-by sender\|domain` | how results are grouped |
 | `-o, --output table\|json` | output format; progress messages go to stderr (`-q` silences them) |
 | `--move-to`, `--create-folder`, `--dry-run`, `-y, --yes` | move the detected newsletters; asks for confirmation unless `--yes` is passed |
+| `--retry-failed` | with `--unsubscribe`: also retry senders marked `manual` after an earlier failure |
 | `--unsubscribe` | list the one-click senders and ask which to unsubscribe from (`1,3`, `1-3`, `all`); with `-y` it unsubscribes from all of them without asking, so wanted senders and receipts go too; `--dry-run` only lists |
 
 The exit code is non-zero if any account failed. The other accounts are still scanned and reported.

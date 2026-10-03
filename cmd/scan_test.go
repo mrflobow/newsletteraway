@@ -252,11 +252,54 @@ func TestUnsubscribeFailureIsRemembered(t *testing.T) {
 		t.Fatalf("retried inside the window: err=%v posts=%d", err, posts)
 	}
 
-	// After the retry window it is tried again.
+	// A permanent failure (403) is not retried, however old...
 	store, _ := track.Load(track.DefaultPath())
-	store.AddFailure("u", "news@acme.example", time.Now().Add(-track.RetryAfter-time.Hour), "old")
+	store.AddFailure("u", "news@acme.example", time.Now().AddDate(0, 0, -90), "403", false)
 	store.Save()
-	if _, err := run(t, append(common, "--unsubscribe", "-y")...); err == nil || posts != 2 {
-		t.Fatalf("expected a retry after the window: err=%v posts=%d", err, posts)
+	if _, err := run(t, append(common, "--unsubscribe", "-y")...); err != nil || posts != 1 {
+		t.Fatalf("permanent failure retried: err=%v posts=%d", err, posts)
+	}
+	// ...unless --retry-failed forces it.
+	if _, err := run(t, append(common, "--unsubscribe", "-y", "--retry-failed")...); err == nil || posts != 2 {
+		t.Fatalf("expected a forced retry: err=%v posts=%d", err, posts)
+	}
+}
+
+func TestUnsubscribeTemporaryFailureRetriesAfterADay(t *testing.T) {
+	posts := 0
+	hook := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer hook.Close()
+	oldClient, oldTTY := unsub.Client, isTTY
+	unsub.Client = hook.Client()
+	defer func() { unsub.Client, isTTY = oldClient, oldTTY }()
+	isTTY = func() bool { return false }
+
+	host, port, _ := net.SplitHostPort(startServerMsg(t,
+		"From: Acme <news@acme.example>\r\nSubject: Weekly\r\nDate: Mon, 28 Sep 2026 10:00:00 +0000\r\n"+
+			"List-Unsubscribe: <"+hook.URL+"/u>\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n\r\nhi\r\n"))
+	t.Setenv("NA_TEST_PW", "p")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	args := []string{"scan", "-q", "--host", host, "--port", port, "--security", "none", "--user", "u", "--password-env", "NA_TEST_PW", "--unsubscribe", "-y"}
+
+	if _, err := run(t, args...); err == nil || posts != 1 {
+		t.Fatalf("err=%v posts=%d", err, posts)
+	}
+	if _, err := run(t, args...); err != nil || posts != 1 { // same day: skipped
+		t.Fatalf("retried too early: err=%v posts=%d", err, posts)
+	}
+	store, _ := track.Load(track.DefaultPath())
+	e := store.Entries["u\x00news@acme.example"]
+	if !e.Temporary {
+		t.Fatalf("503 should be temporary: %+v", e)
+	}
+	store.AddFailure("u", "news@acme.example", time.Now().Add(-track.TempRetryAfter-time.Hour), e.Failure, true)
+	store.Save()
+	if _, err := run(t, args...); err == nil || posts != 2 { // a day later: tried again
+		t.Fatalf("not retried after a day: err=%v posts=%d", err, posts)
 	}
 }
