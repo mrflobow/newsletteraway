@@ -11,7 +11,7 @@ go test ./cmd -run TestScanCommand -v   # prints the rendered table output
 go vet ./... && gofmt -l .
 ```
 
-Git: single branch `main`, no remote. Run `go vet`, `gofmt -l` and `go test ./...` before committing.
+Git: single branch `main`, remote `origin` (`git@github.com:mrflobow/newsletteraway.git`). Everything committed can be pushed, so never commit secrets, real configs or real mail. Run `go vet`, `gofmt -l` and `go test ./...` before committing.
 
 Tests never touch real mail servers. Do not run `scan` against real providers with placeholder addresses such as `me@icloud.com` from the example config, because those may be real people's accounts.
 
